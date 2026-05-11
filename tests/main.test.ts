@@ -20,6 +20,9 @@ const DEFAULT_HOOK = "issue_comment.created";
 const DEFAULT_ISSUE_ID = "1";
 const DEFAULT_BODY = "Test issue body";
 const ISSUES_EDITED_EVENT_NAME = "issues.edited";
+const SIMILAR_ISSUE_TITLE = "Similar Issue: Suggest based on Similarity";
+const CONTRIBUTOR_LOGIN = "contributor1";
+const CONTRIBUTOR_URL = `https://github.com/${CONTRIBUTOR_LOGIN}`;
 
 dotenv.config();
 const octokit = new Octokit();
@@ -306,13 +309,13 @@ describe("Plugin tests", () => {
     // Mock the graphql function to return predefined issue data
     context.octokit.graphql = mock().mockResolvedValue({
       node: {
-        title: "Similar Issue: Suggest based on Similarity",
+        title: SIMILAR_ISSUE_TITLE,
         url: STRINGS.ISSUE_URL_TEMPLATE,
         state: "closed",
         stateReason: "COMPLETED",
         closed: true,
         repository: { owner: { login: STRINGS.USER_1 }, name: STRINGS.TEST_REPO },
-        assignees: { nodes: [{ login: "contributor1", url: "https://github.com/contributor1" }] },
+        assignees: { nodes: [{ login: CONTRIBUTOR_LOGIN, url: CONTRIBUTOR_URL }] },
       },
     }) as unknown as typeof context.octokit.graphql;
 
@@ -325,7 +328,7 @@ describe("Plugin tests", () => {
     const comments = db.issueComments.findMany({ where: { node_id: { equals: "task_complete" } } });
     expect(comments.length).toBe(1);
     expect(comments[0].body).toContain(STRINGS.CONTRIBUTOR_SUGGESTION_TEXT);
-    expect(comments[0].body).toContain("contributor1");
+    expect(comments[0].body).toContain(CONTRIBUTOR_LOGIN);
     expect(comments[0].body).toContain("98% Match");
   });
 
@@ -353,13 +356,13 @@ describe("Plugin tests", () => {
 
     context.octokit.graphql = mock().mockResolvedValue({
       node: {
-        title: "Similar Issue: Suggest based on Similarity",
+        title: SIMILAR_ISSUE_TITLE,
         url: STRINGS.ISSUE_URL_TEMPLATE,
         state: "closed",
         stateReason: "COMPLETED",
         closed: true,
         repository: { owner: { login: STRINGS.USER_1 }, name: STRINGS.TEST_REPO },
-        assignees: { nodes: [{ login: "contributor1", url: "https://github.com/contributor1" }] },
+        assignees: { nodes: [{ login: CONTRIBUTOR_LOGIN, url: CONTRIBUTOR_URL }] },
       },
     }) as unknown as typeof context.octokit.graphql;
 
@@ -396,7 +399,88 @@ describe("Plugin tests", () => {
     expect(comments.length).toBe(1);
     expect(comments[0].id).toBe(10);
     expect(comments[0].body).toContain(STRINGS.CONTRIBUTOR_SUGGESTION_TEXT);
-    expect(comments[0].body).toContain("contributor1");
+    expect(comments[0].body).toContain(CONTRIBUTOR_LOGIN);
+    expect(comments[0].body).toContain("98% Match");
+  });
+
+  it("When duplicate recommendation cleanup races with another run, it should ignore missing comments", async () => {
+    const [taskCompleteIssue] = fetchSimilarIssues("task_complete");
+    const { context } = createContextIssues(taskCompleteIssue.issue_body, "task_complete_race", 14, taskCompleteIssue.title);
+    context.eventName = ISSUES_EDITED_EVENT_NAME;
+
+    context.adapters.supabase.issue.createIssue = mock(async () => {
+      createIssue(
+        taskCompleteIssue.issue_body,
+        "task_complete_race",
+        taskCompleteIssue.title,
+        14,
+        { login: "test", id: 1 },
+        "open",
+        null,
+        STRINGS.TEST_REPO,
+        STRINGS.USER_1
+      );
+    });
+    context.adapters.supabase.issue.findSimilarIssuesToMatch = mock().mockResolvedValue([
+      { issue_id: "task_complete_race", similarity: 0.98 },
+    ] as unknown as IssueSimilaritySearchResult[]);
+
+    context.octokit.graphql = mock().mockResolvedValue({
+      node: {
+        title: SIMILAR_ISSUE_TITLE,
+        url: STRINGS.ISSUE_URL_TEMPLATE,
+        state: "closed",
+        stateReason: "COMPLETED",
+        closed: true,
+        repository: { owner: { login: STRINGS.USER_1 }, name: STRINGS.TEST_REPO },
+        assignees: { nodes: [{ login: CONTRIBUTOR_LOGIN, url: CONTRIBUTOR_URL }] },
+      },
+    }) as unknown as typeof context.octokit.graphql;
+
+    const duplicateComment = `>[!NOTE]\n>${STRINGS.CONTRIBUTOR_SUGGESTION_TEXT}\n>### [old](https://www.github.com/old)`;
+    createComment(duplicateComment, 20, "task_complete_race", 14);
+    createComment(duplicateComment, 21, "task_complete_race", 14);
+    createComment(duplicateComment, 22, "task_complete_race", 14);
+
+    context.octokit.paginate = mock(async () =>
+      db.issueComments.findMany({ where: { issue_number: { equals: 14 } } })
+    ) as unknown as typeof context.octokit.paginate;
+
+    context.octokit.rest.issues.updateComment = mock(async (params: { comment_id: number; body: string }) => {
+      db.issueComments.update({
+        where: {
+          id: { equals: params.comment_id },
+        },
+        data: {
+          body: params.body,
+        },
+      });
+    }) as unknown as typeof octokit.rest.issues.updateComment;
+
+    context.octokit.rest.issues.deleteComment = mock(async (params: { comment_id: number }) => {
+      if (params.comment_id === 21) {
+        db.issueComments.delete({
+          where: {
+            id: { equals: params.comment_id },
+          },
+        });
+        throw { status: 404 };
+      }
+
+      db.issueComments.delete({
+        where: {
+          id: { equals: params.comment_id },
+        },
+      });
+    }) as unknown as typeof octokit.rest.issues.deleteComment;
+
+    await runPlugin(context);
+
+    const comments = db.issueComments.findMany({ where: { issue_number: { equals: 14 } } });
+    expect(comments.length).toBe(1);
+    expect(comments[0].id).toBe(20);
+    expect(comments[0].body).toContain(STRINGS.CONTRIBUTOR_SUGGESTION_TEXT);
+    expect(comments[0].body).toContain(CONTRIBUTOR_LOGIN);
     expect(comments[0].body).toContain("98% Match");
   });
 

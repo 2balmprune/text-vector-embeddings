@@ -53,6 +53,29 @@ async function listIssueComments(context: Context<"issues.opened" | "issues.edit
   })) as IssueCommentSummary[];
 }
 
+async function deleteCommentsBestEffort(context: Context<"issues.opened" | "issues.edited" | "issues.labeled">, target: IssueTarget, commentIds: number[]) {
+  const results = await Promise.allSettled(
+    commentIds.map((commentId) =>
+      context.octokit.rest.issues.deleteComment({
+        owner: target.owner,
+        repo: target.repo,
+        comment_id: commentId,
+      })
+    )
+  );
+
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      continue;
+    }
+
+    const status = result.reason?.status ?? result.reason?.response?.status;
+    if (status !== 404) {
+      throw result.reason;
+    }
+  }
+}
+
 async function cleanupDuplicateMatchmakingComments(
   context: Context<"issues.opened" | "issues.edited" | "issues.labeled">,
   target: IssueTarget,
@@ -76,21 +99,17 @@ async function cleanupDuplicateMatchmakingComments(
     });
   }
 
-  await Promise.all(
-    duplicates.map((comment) =>
-      context.octokit.rest.issues.deleteComment({
-        owner: target.owner,
-        repo: target.repo,
-        comment_id: comment.id,
-      })
-    )
+  await deleteCommentsBestEffort(
+    context,
+    target,
+    duplicates.map((comment) => comment.id)
   );
 
   return commentToKeep;
 }
 
 export async function issueMatchingWithComment(context: Context<"issues.opened" | "issues.edited" | "issues.labeled">) {
-  const { logger, octokit, payload } = context;
+  const { logger, payload } = context;
   const issue = payload.issue;
   const commentStart = ">The following contributors may be suitable for this task:";
   const target = {
@@ -115,16 +134,10 @@ export async function issueMatchingWithComment(context: Context<"issues.opened" 
 
   if (matchResultArray.size === 0) {
     if (existingComment) {
-      await Promise.all(
-        listIssues
-          .filter((comment) => isMatchmakingComment(commentStart, comment))
-          .map((comment) =>
-            octokit.rest.issues.deleteComment({
-              owner: target.owner,
-              repo: target.repo,
-              comment_id: comment.id,
-            })
-          )
+      await deleteCommentsBestEffort(
+        context,
+        target,
+        listIssues.filter((comment) => isMatchmakingComment(commentStart, comment)).map((comment) => comment.id)
       );
     }
     logger.debug("No suitable contributors found");
