@@ -37,14 +37,23 @@ type IssueTarget = {
   issueNumber: number;
 };
 
+/**
+ * Narrows GraphQL node responses to issues that still exist and are accessible.
+ */
 function hasIssueNode(response: IssueNodeResponse): response is IssueGraphqlResponse {
   return response.node !== null;
 }
 
+/**
+ * Detects the bot's matchmaking recommendation comment using its stable intro marker.
+ */
 function isMatchmakingComment(commentStart: string, comment: IssueCommentSummary) {
   return Boolean(comment.body && comment.body.includes(">[!NOTE]" + "\n" + commentStart));
 }
 
+/**
+ * Loads every comment on the target issue so duplicate recommendation comments can be reconciled.
+ */
 async function listIssueComments(context: Context<"issues.opened" | "issues.edited" | "issues.labeled">, target: IssueTarget) {
   return (await context.octokit.paginate(context.octokit.rest.issues.listComments, {
     owner: target.owner,
@@ -53,6 +62,9 @@ async function listIssueComments(context: Context<"issues.opened" | "issues.edit
   })) as IssueCommentSummary[];
 }
 
+/**
+ * Deletes issue comments while tolerating concurrent webhook runs that already deleted the same comment.
+ */
 async function deleteCommentsBestEffort(context: Context<"issues.opened" | "issues.edited" | "issues.labeled">, target: IssueTarget, commentIds: number[]) {
   const results = await Promise.allSettled(
     commentIds.map((commentId) =>
@@ -76,6 +88,9 @@ async function deleteCommentsBestEffort(context: Context<"issues.opened" | "issu
   }
 }
 
+/**
+ * Keeps one canonical matchmaking recommendation comment and removes stale duplicates.
+ */
 async function cleanupDuplicateMatchmakingComments(
   context: Context<"issues.opened" | "issues.edited" | "issues.labeled">,
   target: IssueTarget,
@@ -108,6 +123,9 @@ async function cleanupDuplicateMatchmakingComments(
   return commentToKeep;
 }
 
+/**
+ * Posts, updates, or removes matchmaking comments when an issue changes.
+ */
 export async function issueMatchingWithComment(context: Context<"issues.opened" | "issues.edited" | "issues.labeled">) {
   const { logger, payload } = context;
   const issue = payload.issue;
@@ -176,6 +194,9 @@ export async function issueMatching(context: Context<IssueMatchingEvents>) {
   return issueMatchingInternal(context, {});
 }
 
+/**
+ * Runs issue matching constrained to a caller-provided set of GitHub logins.
+ */
 export async function issueMatchingForUsers(context: Context<IssueMatchingEvents>, users: string[]) {
   const uniqueUsers = Array.from(new Set(users.map((u) => u.trim()).filter(Boolean)));
   return issueMatchingInternal(context, {
@@ -195,6 +216,9 @@ type IssueMatchingInternalOptions = {
   includeNonCompleted?: boolean;
 };
 
+/**
+ * Finds similar completed issues and returns contributor matches for the current issue.
+ */
 async function issueMatchingInternal(context: Context<IssueMatchingEvents>, options: IssueMatchingInternalOptions) {
   const {
     logger,
